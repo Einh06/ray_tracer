@@ -7,7 +7,7 @@
 #include <time.h>
 
 #define ArrayCount(a) (sizeof(a) / sizeof(a[0]))
-
+#define MIN(a,b) (a) < (b) ? (a) : (b)
 double drand48() {
     return ((double)rand()/(RAND_MAX+1));
 }
@@ -95,6 +95,10 @@ typedef struct ray3 {
     v3 direction;
 } ray3;
 
+inline v3 ray3_PointAt(ray3 r, float t) {
+    return v3_Add(r.origin, v3_Scale(r.direction, t));
+}
+
 typedef struct Camera {
     v3 origin;
     v3 lower_left;
@@ -114,12 +118,48 @@ ray3 Camera_GetRay(Camera *c, float u, float v) {
     };
 }
 
+v3 random_in_unit_sphere(void) {
+    v3 p;
+    do {
+        p = v3_Sub(
+            v3_Scale((v3){drand48(), drand48(), drand48()}, 2.0),
+            (v3){1.0, 1.0, 1.0}
+            );
+    } while (v3_SquaredLength(p) >= 1.0);
+    return p;
+}
+
+typedef enum MaterialKind {
+    MATKIND_LAMBERTIAN,
+    MATKIND_METAL,
+    MATKIND_COUNT,
+} MaterialKind;
+
+typedef struct Material {
+    MaterialKind kind;
+    union {
+        struct {
+            v3 albedo;
+        } lambertian;
+        
+        struct {
+            v3 albedo;
+            float fuzz;
+        } metal;
+    };
+} Material;
+
+Material Material_MakeLambertian(v3 albedo) {
+    return (Material){.kind = MATKIND_LAMBERTIAN, .lambertian = {albedo}};
+}
+
+Material Material_MakeMetal(v3 albedo, float fuzz) {
+    fuzz = MIN(fuzz, 1.0);
+    return (Material){.kind = MATKIND_METAL, .metal = {albedo, fuzz}};
+}
+
 typedef enum ObjectKind {
-    OBJECTKIND_NONE,
-    
     OBJECTKIND_SPHERE,
-    
-    OBJECTKIND_COUNT,
 }ObjectKind;
 
 typedef struct Object {
@@ -131,28 +171,45 @@ typedef struct Object {
             float radius;
         } sphere;
     };
+    Material mat;
 } Object;
 
 typedef struct HitInformation {
     float t;
     v3 pos;
     v3 norm;
+    Material mat;
 } HitInformation;
 
-inline v3 ray3_PointAt(ray3 r, float t) {
-    return v3_Add(r.origin, v3_Scale(r.direction, t));
+bool Scatter(ray3* r, HitInformation* h, v3* attenuation, ray3* scattered) {
+    switch(h->mat.kind) {
+        case MATKIND_LAMBERTIAN:
+        {
+            v3 target = v3_Add(
+                random_in_unit_sphere(),
+                v3_Add(h->pos, h->norm)
+                );
+            
+            *scattered = (ray3){.origin = h->pos, .direction = v3_Sub(target, h->pos)};
+            *attenuation = h->mat.lambertian.albedo;
+            return true;
+        }
+        case MATKIND_METAL: 
+        {
+            v3 reflected = v3_Sub(r->direction,
+                                  v3_Scale(h->norm, 2.0f * v3_Dot(r->direction, h->norm))
+                                  );
+            v3 random_in_sphere = v3_Scale(random_in_unit_sphere(), h->mat.metal.fuzz);
+            *scattered = (ray3){.origin = h->pos, .direction = v3_Add(reflected, random_in_sphere)};
+            *attenuation = h->mat.metal.albedo;
+            return v3_Dot(scattered->direction, h->norm) > 0.f;
+        }
+        default:
+        exit(1);
+    }
+    return false;
 }
 
-v3 random_in_unit_sphere(void) {
-    v3 p;
-    do {
-        p = v3_Sub(
-            v3_Scale((v3){drand48(), drand48(), drand48()}, 2.0),
-            (v3){1.0, 1.0, 1.0}
-            );
-    } while (v3_SquaredLength(p) >= 1.0);
-    return p;
-}
 
 bool hit_sphere(ray3 r, Object *o, float tmin, float tmax, HitInformation *h) {
     assert(o->kind == OBJECTKIND_SPHERE);
@@ -188,26 +245,24 @@ bool hit_sphere(ray3 r, Object *o, float tmin, float tmax, HitInformation *h) {
     return false;
 }
 
-v3 Color(ray3 r, Object *objects, int object_count) {
+v3 Color(ray3 r, Object *objects, int object_count, int depth) {
     
     HitInformation h;
     
-    for (Object *o = objects; o < objects + object_count; o++) {
+    for (Object *o = objects; o < objects + object_count; o++){
         switch (o->kind) {
             case OBJECTKIND_SPHERE: {
                 
-                if (!hit_sphere(r, o, 0.0, FLT_MAX,  &h)) { continue; }
-                v3 target = v3_Add(
-                    random_in_unit_sphere(),
-                    v3_Add(h.pos, h.norm)
-                    );
-                
-                ray3 new_ray = (ray3){.origin = h.pos, .direction = v3_Sub(target, h.pos)};
-                v3 color = Color(new_ray, objects, object_count); 
-                
-                return v3_Scale(
-                    color,
-                    0.5f);
+                if (!hit_sphere(r, o, 0.001, FLT_MAX,  &h)) { continue; }
+                h.mat = o->mat;
+                ray3 new_ray;
+                v3 attenutation;
+                if (depth < 50 && Scatter(&r, &h,&attenutation, &new_ray)) {
+                    v3 color = Color(new_ray, objects, object_count, depth + 1);
+                    return (v3){color.r * attenutation.r, color.g * attenutation.g, color.b * attenutation.b};
+                } else {
+                    return (v3){ 0.f, 0.f, 0.f};
+                }
             }
             
             default: {
@@ -254,13 +309,27 @@ int main(int argc, char** argv) {
         {
             .kind = OBJECTKIND_SPHERE, 
             .pos = v3_Make(0.f, 0.f, -1.f), 
-            .sphere = {.radius = 0.5f}
+            .sphere = {.radius = 0.5f},
+            .mat = Material_MakeLambertian(v3_Make(0.8f, 0.3f, 0.3f)),
+        },
+        {
+            .kind = OBJECTKIND_SPHERE, 
+            .pos = v3_Make(1.f, 0.f, -1.f), 
+            .sphere = {.radius = 0.5f},
+            .mat = Material_MakeMetal(v3_Make(0.8f, 0.6f, 0.2f), 1.0f),
+        },
+        {
+            .kind = OBJECTKIND_SPHERE, 
+            .pos = v3_Make(-1.f, 0.f, -1.f), 
+            .sphere = {.radius = 0.5f},
+            .mat = Material_MakeMetal(v3_Make(0.8f, 0.8f, 0.8f), 0.3f),
         },
         {
             .kind = OBJECTKIND_SPHERE, 
             .pos = v3_Make(0.f, -100.5f, -1.f), 
-            .sphere = {.radius = 100.0f}
-        }
+            .sphere = {.radius = 100.0f},
+            .mat = Material_MakeLambertian(v3_Make(0.8f, 0.8f, 0.0f)),
+        },
     };
     
     for (int j = height - 1; j >= 0; j--) {
@@ -273,9 +342,10 @@ int main(int argc, char** argv) {
                 
                 ray3 r = Camera_GetRay(&c, u, v);
                 
-                v3_Added(&color, Color(r, world, ArrayCount(world))); // get color mapped from 0.0 - 1.0
+                v3_Added(&color, Color(r, world, ArrayCount(world), 0)); // get color mapped from 0.0 - 1.0
             }
             v3_Scaled(&color, (1.f/((float)rand_step)));
+            color = (v3){sqrt(color.r), sqrt(color.g), sqrt(color.b)};
             color = v3_Scale(color, 255.99); // map colors from 0.0 - 1.0 to 0 - 255
             OUT_PRINT("%d %d %d", (int)color.r, (int)color.g, (int)color.b);
         }
