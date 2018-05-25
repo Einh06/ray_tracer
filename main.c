@@ -79,7 +79,7 @@ inline v3 v3_Neg(v3 v) {
     return (v3){-v.x, -v.y, -v.z};
 }
 
-inline v3 v3_Scale(v3 v, float s) {
+inline v3 v3_Mul(v3 v, float s) {
     return (v3){.x = v.x * s, .y = v.y * s, .z = v.z * s };
 }
 
@@ -103,7 +103,7 @@ typedef struct ray3 {
 } ray3;
 
 inline v3 ray3_PointAt(ray3 r, float t) {
-    return v3_Add(r.origin, v3_Scale(r.direction, t));
+    return v3_Add(r.origin, v3_Mul(r.direction, t));
 }
 
 typedef struct Camera {
@@ -118,8 +118,8 @@ ray3 Camera_GetRay(Camera *c, float u, float v) {
         .origin = c->origin,
         .direction = v3_Add(c->lower_left,
                             v3_Add(
-            v3_Scale(c->horizontal, u),
-            v3_Scale(c->vertical, v)
+            v3_Mul(c->horizontal, u),
+            v3_Mul(c->vertical, v)
             )
                             )
     };
@@ -129,7 +129,7 @@ v3 random_in_unit_sphere(void) {
     v3 p;
     do {
         p = v3_Sub(
-            v3_Scale((v3){drand48(), drand48(), drand48()}, 2.0),
+            v3_Mul((v3){drand48(), drand48(), drand48()}, 2.0),
             (v3){1.0, 1.0, 1.0}
             );
     } while (v3_SquaredLength(p) >= 1.0);
@@ -139,6 +139,7 @@ v3 random_in_unit_sphere(void) {
 typedef enum MaterialKind {
     MATKIND_LAMBERTIAN,
     MATKIND_METAL,
+    MATKIND_DIELETRIC,
     MATKIND_COUNT,
 } MaterialKind;
 
@@ -153,6 +154,10 @@ typedef struct Material {
             v3 albedo;
             float fuzz;
         } metal;
+        
+        struct { 
+            float ref_idx;
+        } dieletric;
     };
 } Material;
 
@@ -163,6 +168,10 @@ Material Material_MakeLambertian(v3 albedo) {
 Material Material_MakeMetal(v3 albedo, float fuzz) {
     fuzz = CLAMP_MAX(fuzz, 1.0);
     return (Material){.kind = MATKIND_METAL, .metal = {albedo, fuzz}};
+}
+
+Material Material_MakeDieletric(float ref_idx) {
+    return (Material){.kind = MATKIND_DIELETRIC, .dieletric = {ref_idx}};
 }
 
 typedef enum ObjectKind {
@@ -190,8 +199,35 @@ typedef struct HitInformation {
 
 v3 Reflected(v3 v, v3 n) {
     return v3_Sub(v,
-                  v3_Scale(n, 2.0f * v3_Dot(v, n))
+                  v3_Mul(n, 2.0f * v3_Dot(v, n))
                   );
+}
+
+bool Refracted(v3 v, v3 n, float ni_over_nt, v3* refracted) 
+{
+    v3 uv = v3_Normalize(v);
+    
+    float dt = v3_Dot(uv, n);
+    float discriminant = 1.0 - ni_over_nt * ni_over_nt * (1 - dt * dt);
+    if (discriminant > 0) {
+        //ni_over_nt*(uv - n*dt)
+        v3 lhs = v3_Mul(
+            v3_Sub(uv, v3_Mul(n, dt)), 
+            ni_over_nt);
+        //n*sqrt(discriminant)
+        v3 rhs = v3_Mul(n, sqrt(discriminant));
+        //(ni_over_nt*(uv-n*dt) - (n*sqrt(discriminant))
+        *refracted = v3_Sub(lhs, rhs);
+        return true;
+    } else {
+        return false;
+    }
+}
+
+float Schilk(float cosine, float ref_idx) {
+    float r0 = (1.f-ref_idx) / (1.f+ref_idx);
+    r0 = r0 * r0;
+    return r0 + (1.f-r0) * powf((1.f-cosine), 5);
 }
 
 bool Scatter(ray3* r, HitInformation* h, v3* attenuation, ray3* scattered) {
@@ -211,10 +247,48 @@ bool Scatter(ray3* r, HitInformation* h, v3* attenuation, ray3* scattered) {
         case MATKIND_METAL: 
         {
             v3 reflected = Reflected(r->direction, h->norm);
-            v3 random_in_sphere = v3_Scale(random_in_unit_sphere(), h->mat.metal.fuzz);
+            v3 random_in_sphere = v3_Mul(random_in_unit_sphere(), h->mat.metal.fuzz);
             *scattered = (ray3){.origin = h->pos, .direction = v3_Add(reflected, random_in_sphere)};
             *attenuation = h->mat.metal.albedo;
             return v3_Dot(scattered->direction, h->norm) > 0.f;
+        }
+        
+        case MATKIND_DIELETRIC:
+        {
+            v3 outward_normal;
+            v3 reflected = Reflected(r->direction, h->norm);
+            float ni_over_nl;
+            *attenuation = (v3){1.0, 1.0, 1.0};
+            v3 refracted;
+            float cosine;
+            float reflect_prob;
+            
+            float ref_idx = h->mat.dieletric.ref_idx;
+            
+            float dot = v3_Dot(r->direction, h->norm);
+            if (dot > 0) {
+                outward_normal = v3_Neg(h->norm);
+                ni_over_nl = ref_idx;
+                cosine = dot / v3_Length(r->direction);
+                cosine = sqrt( 1 - ref_idx*ref_idx * (1 - cosine*cosine));
+            } else {
+                outward_normal = h->norm;
+                ni_over_nl = 1.0 / ref_idx;
+                cosine = -dot / v3_Length(r->direction);
+            }
+            
+            if (Refracted(r->direction, outward_normal, ni_over_nl, &refracted)) {
+                reflect_prob = Schilk(cosine, ref_idx);
+            } else {
+                reflect_prob = 1.0;
+            }
+            
+            if (drand48() < reflect_prob) {
+                *scattered = (ray3){h->pos, reflected};
+            } else {
+                *scattered = (ray3){h->pos, refracted};
+            }
+            return true;
         }
         default:
         exit(1);
@@ -235,12 +309,11 @@ bool hit_sphere(ray3 r, Object *o, float tmin, float tmax, HitInformation *h) {
     float discriminant = b*b - a*c;
     
     if (discriminant >= 0.f) {
-        
         float temp = (-b - sqrt(discriminant)) / a;
         if (temp >= tmin && temp <= tmax) {
             h->t = temp;
             h->pos = ray3_PointAt(r, temp);
-            h->norm = v3_Normalize( v3_Sub(h->pos, sphere_center) );
+            h->norm = v3_Normalize(v3_Mul(v3_Sub(h->pos, sphere_center), 1.f/radius));
             return true;
         }
         
@@ -248,7 +321,7 @@ bool hit_sphere(ray3 r, Object *o, float tmin, float tmax, HitInformation *h) {
         if (temp >= tmin && temp <= tmax) {
             h->t = temp;
             h->pos = ray3_PointAt(r, temp);
-            h->norm = v3_Normalize( v3_Sub(h->pos, sphere_center) );
+            h->norm = v3_Normalize(v3_Mul(v3_Sub(h->pos, sphere_center), 1.f/radius));
             return true;
         }
     }
@@ -295,8 +368,8 @@ v3 Color(ray3 r, Object *objects, int object_count, int depth) {
         v3 unit_direction = v3_Normalize(r.direction);
         float t = (unit_direction.y + 1.f) * 0.5f;
         return v3_Add(
-            v3_Scale(v3_Make(1.f, 1.f, 1.f), (1.f-t)),
-            v3_Scale(v3_Make(0.5f, 0.7f, 1.f), t)
+            v3_Mul(v3_Make(1.f, 1.f, 1.f), (1.f-t)),
+            v3_Mul(v3_Make(0.5f, 0.7f, 1.f), t)
             );
     }
 }
@@ -339,11 +412,18 @@ int main(int argc, char** argv) {
             .sphere = {.radius = 0.5f},
             .mat = Material_MakeMetal(v3_Make(0.8f, 0.6f, 0.2f), 1.0f),
         },
+        
         {
             .kind = OBJECTKIND_SPHERE, 
             .pos = v3_Make(-1.f, 0.f, -1.f), 
             .sphere = {.radius = 0.5f},
-            .mat = Material_MakeMetal(v3_Make(0.8f, 0.8f, 0.8f), 0.3f),
+            .mat = Material_MakeDieletric(1.5f),
+        },
+        {
+            .kind = OBJECTKIND_SPHERE, 
+            .pos = v3_Make(-1.f, 0.f, -1.f), 
+            .sphere = {.radius = -0.49f},
+            .mat = Material_MakeDieletric(1.5f),
         },
         {
             .kind = OBJECTKIND_SPHERE, 
@@ -367,7 +447,7 @@ int main(int argc, char** argv) {
             }
             v3_Scaled(&color, (1.f/((float)rand_step)));
             color = (v3){sqrt(color.r), sqrt(color.g), sqrt(color.b)};
-            color = v3_Scale(color, 255.99); // map colors from 0.0 - 1.0 to 0 - 255
+            color = v3_Mul(color, 255.99); // map colors from 0.0 - 1.0 to 0 - 255
             OUT_PRINT("%d %d %d", (int)color.r, (int)color.g, (int)color.b);
         }
         OUT_PRINT("\n");
