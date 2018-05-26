@@ -1,101 +1,18 @@
 #include <stdio.h>
 #include <stdlib.h>
+#define _USE_MATH_DEFINES
 #include <math.h>
 #include <stdbool.h>
 #include <assert.h>
 #include <float.h>
 #include <time.h>
 
-#define ArrayCount(a) (sizeof(a) / sizeof(a[0]))
-#define MIN(a,b) (a) < (b) ? (a) : (b)
-#define MAX(a,b) (a) > (b) ? (a) : (b)
-#define CLAMP_MAX(a,b) MIN(a,b)
-#define CLAMP_MIN(a,b) MAX(a,b)
-double drand48() {
-    return ((double)rand()/(RAND_MAX+1.0f));
-}
+#include "common.h"
+#include "vec3.h"
+#include "material.h"
 
-typedef struct v3 {
-    union {
-        float v[3];
-        struct {
-            float x;
-            float y;
-            float z;
-        };
-        struct {
-            float r;
-            float g;
-            float b;
-        };
-    };
-} v3;
-
-inline v3 v3_Make(float x, float y, float z) {
-    return (v3){.x = x, .y = y, .z = z};
-}
-
-inline float v3_Length( v3 v) {
-    return sqrt( v.x * v.x + v.y * v.y + v.z * v.z);
-}
-
-inline float v3_SquaredLength(v3 v) {
-    return v.x * v.x + v.y * v.y + v.z * v.z;
-}
-
-inline v3 v3_Normalize(v3 v) {
-    float inv_l = 1.0f / v3_Length(v);
-    return (v3) {.x = v.x * inv_l, .y = v.y * inv_l, .z = v.z * inv_l};
-}
-
-inline void v3_Normalized(v3* v) {
-    float inv_l = 1.0f / v3_Length(*v);
-    v->x *= inv_l;
-    v->y *= inv_l;
-    v->z *= inv_l;
-}
-
-inline v3 v3_Add(v3 a, v3 b) {
-    return (v3){.x = a.x + b.x, .y = a.y + b.y, .z = a.z + b.z };
-}
-
-inline void v3_Added(v3* v, v3 a) {
-    v->x += a.x;
-    v->y += a.y;
-    v->z += a.z;
-}
-
-inline v3 v3_Sub(v3 a, v3 b) {
-    return (v3){.x = a.x - b.x, .y = a.y - b.y, .z = a.z - b.z };
-}
-
-inline v3 v3_Subed(v3* v, v3 a) {
-    v->x -= a.x;
-    v->y -= a.y;
-    v->z -= a.z;
-}
-
-inline v3 v3_Neg(v3 v) {
-    return (v3){-v.x, -v.y, -v.z};
-}
-
-inline v3 v3_Mul(v3 v, float s) {
-    return (v3){.x = v.x * s, .y = v.y * s, .z = v.z * s };
-}
-
-inline v3_Scaled(v3* v, float s) {
-    v->x *= s;
-    v->y *= s;
-    v->z *= s;
-}
-
-inline float v3_Dot(v3 a, v3 b) {
-    return a.x * b.x + a.y * b.y + a.z * b.z;
-}
-
-inline v3 v3_Cross(v3 a, v3 b) {
-    return (v3){ .x = a.y * b.z - a.z * b.y, .y = a.z * b.x - a.x * b.z, .z = a.x * b.y - a.y * b.x};
-}
+#include "vec3.c"
+#include "material.c"
 
 typedef struct ray3 {
     v3 origin;
@@ -113,15 +30,39 @@ typedef struct Camera {
     v3 vertical;
 } Camera;
 
-ray3 Camera_GetRay(Camera *c, float u, float v) {
+Camera Camera_Make(v3 lookFrom, v3 lookAt, v3 vup, float vfov, float aspect) {
+    
+    float theta = vfov*M_PI/180.f;
+    float half_height = tan(theta/2.f);
+    float half_width = aspect * half_height;
+    
+    v3 w = v3_Normalize(v3_Sub(lookFrom, lookAt));
+    v3 u = v3_Normalize(v3_Cross(vup, w));
+    v3 v = v3_Cross(w, u);
+    
+    v3 horizontal = v3_Mul(u, 2*half_width);
+    v3 vertical = v3_Mul(v, 2*half_height);
+    //((origin - u*half_width) - v * half_height) - w
+    v3 lower_left =
+        v3_Sub(v3_Sub(v3_Sub(lookFrom, v3_Mul(u, half_width)), v3_Mul(v, half_height)), w);
+    
+    return (Camera){
+        .origin     = lookFrom,
+        .horizontal = horizontal,
+        .vertical   = vertical,
+        .lower_left = lower_left,
+    };
+}
+
+ray3 Camera_GetRay(Camera *c, float s, float t) {
+    
+    v3 h = v3_Mul(c->horizontal, s);
+    v3 v = v3_Mul(c->vertical, t);
+    
+    v3 direction = v3_Sub(v3_Add(c->lower_left, v3_Add(h, v)), c->origin);
     return  (ray3) {
         .origin = c->origin,
-        .direction = v3_Add(c->lower_left,
-                            v3_Add(
-            v3_Mul(c->horizontal, u),
-            v3_Mul(c->vertical, v)
-            )
-                            )
+        .direction = direction
     };
 }
 
@@ -134,44 +75,6 @@ v3 random_in_unit_sphere(void) {
             );
     } while (v3_SquaredLength(p) >= 1.0);
     return p;
-}
-
-typedef enum MaterialKind {
-    MATKIND_LAMBERTIAN,
-    MATKIND_METAL,
-    MATKIND_DIELETRIC,
-    MATKIND_COUNT,
-} MaterialKind;
-
-typedef struct Material {
-    MaterialKind kind;
-    union {
-        struct {
-            v3 albedo;
-        } lambertian;
-        
-        struct {
-            v3 albedo;
-            float fuzz;
-        } metal;
-        
-        struct { 
-            float ref_idx;
-        } dieletric;
-    };
-} Material;
-
-Material Material_MakeLambertian(v3 albedo) {
-    return (Material){.kind = MATKIND_LAMBERTIAN, .lambertian = {albedo}};
-}
-
-Material Material_MakeMetal(v3 albedo, float fuzz) {
-    fuzz = CLAMP_MAX(fuzz, 1.0);
-    return (Material){.kind = MATKIND_METAL, .metal = {albedo, fuzz}};
-}
-
-Material Material_MakeDieletric(float ref_idx) {
-    return (Material){.kind = MATKIND_DIELETRIC, .dieletric = {ref_idx}};
 }
 
 typedef enum ObjectKind {
@@ -387,17 +290,13 @@ int main(int argc, char** argv) {
     int height = 200;
     int rand_step = 100;
     
-    OUT_PRINT("P3\n%d %d\n255\n", width, height);
-    
-    Camera c = {
-        .origin = (v3){.x = 0.0f, .y = 0.0f, .z = 0.0f},
-        .lower_left = (v3){.x = -4.0f, .y = -2.0f, .z = -1.0f},
-        .horizontal = (v3){.x = 8.0f, .y = 0.0f, .z = 0.0f},
-        .vertical = (v3){.x = 0.0f, .y = 4.0f, .z = 0.0f},
-    };
     
     float inv_w = 1.0f / ((float)width);
     float inv_h = 1.0f / ((float)height);
+    
+    OUT_PRINT("P3\n%d %d\n255\n", width, height);
+    
+    Camera c = Camera_Make(v3_Make(-2.f, 2.f, 1.f), v3_Make(0.f, 0.f, -1.f), v3_Make(0.f, 1.f, 0.f), 30.f, ((float)width) / ((float) height));
     
     Object world[] = {
         {
@@ -412,7 +311,6 @@ int main(int argc, char** argv) {
             .sphere = {.radius = 0.5f},
             .mat = Material_MakeMetal(v3_Make(0.8f, 0.6f, 0.2f), 1.0f),
         },
-        
         {
             .kind = OBJECTKIND_SPHERE, 
             .pos = v3_Make(-1.f, 0.f, -1.f), 
@@ -422,7 +320,7 @@ int main(int argc, char** argv) {
         {
             .kind = OBJECTKIND_SPHERE, 
             .pos = v3_Make(-1.f, 0.f, -1.f), 
-            .sphere = {.radius = -0.49f},
+            .sphere = {.radius = -0.45f},
             .mat = Material_MakeDieletric(1.5f),
         },
         {
