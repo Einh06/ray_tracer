@@ -14,6 +14,27 @@
 #include "vec3.c"
 #include "material.c"
 
+v3 random_in_unit_sphere(void) {
+    v3 p;
+    do {
+        p = v3_Sub(
+            v3_Mul((v3){drand48(), drand48(), drand48()}, 2.0),
+            (v3){1.0, 1.0, 1.0}
+            );
+    } while (v3_SquaredLength(p) >= 1.0);
+    return p;
+}
+
+v3 random_in_unit_disk(void) {
+    v3 p;
+    do {
+        p = v3_Sub(
+            v3_Mul((v3){drand48(), drand48(), 0.f}, 2.f), 
+            (v3){1.f, 1.f, 0.f});
+    } while( v3_Dot(p, p) >= 1.f);
+    return p;
+}
+
 typedef struct ray3 {
     v3 origin;
     v3 direction;
@@ -28,9 +49,13 @@ typedef struct Camera {
     v3 lower_left;
     v3 horizontal;
     v3 vertical;
+    v3 u, v, w;
+    float lens_radius;
 } Camera;
 
-Camera Camera_Make(v3 lookFrom, v3 lookAt, v3 vup, float vfov, float aspect) {
+Camera Camera_Make(v3 lookFrom, v3 lookAt, v3 vup, float vfov, float aspect, float aperture, float focus_dist) {
+    
+    float lens_radius = aperture / 2.f;
     
     float theta = vfov*M_PI/180.f;
     float half_height = tan(theta/2.f);
@@ -40,41 +65,43 @@ Camera Camera_Make(v3 lookFrom, v3 lookAt, v3 vup, float vfov, float aspect) {
     v3 u = v3_Normalize(v3_Cross(vup, w));
     v3 v = v3_Cross(w, u);
     
-    v3 horizontal = v3_Mul(u, 2*half_width);
-    v3 vertical = v3_Mul(v, 2*half_height);
+    v3 horizontal = v3_Mul(u, 2*half_width*focus_dist);
+    v3 vertical = v3_Mul(v, 2*half_height*focus_dist);
     //((origin - u*half_width) - v * half_height) - w
     v3 lower_left =
-        v3_Sub(v3_Sub(v3_Sub(lookFrom, v3_Mul(u, half_width)), v3_Mul(v, half_height)), w);
+        v3_Sub(v3_Sub(v3_Sub(
+        lookFrom, 
+        v3_Mul(u, half_width * focus_dist)), 
+                      v3_Mul(v, half_height * focus_dist)), 
+               v3_Mul(w, focus_dist));
     
     return (Camera){
         .origin     = lookFrom,
         .horizontal = horizontal,
         .vertical   = vertical,
         .lower_left = lower_left,
+        .u = u,
+        .v = v,
+        .w = w,
+        .lens_radius = lens_radius,
     };
 }
 
 ray3 Camera_GetRay(Camera *c, float s, float t) {
+    v3 rd = v3_Mul(random_in_unit_disk(), c->lens_radius);
+    v3 offset = v3_Add(
+        v3_Mul(c->u, rd.x),
+        v3_Mul(c->v, rd.y));
     
     v3 h = v3_Mul(c->horizontal, s);
     v3 v = v3_Mul(c->vertical, t);
+    v3 o = v3_Add(c->origin, offset);
     
-    v3 direction = v3_Sub(v3_Add(c->lower_left, v3_Add(h, v)), c->origin);
+    v3 direction = v3_Sub(v3_Add(c->lower_left, v3_Add(h, v)), o);
     return  (ray3) {
-        .origin = c->origin,
+        .origin = o,
         .direction = direction
     };
-}
-
-v3 random_in_unit_sphere(void) {
-    v3 p;
-    do {
-        p = v3_Sub(
-            v3_Mul((v3){drand48(), drand48(), drand48()}, 2.0),
-            (v3){1.0, 1.0, 1.0}
-            );
-    } while (v3_SquaredLength(p) >= 1.0);
-    return p;
 }
 
 typedef enum ObjectKind {
@@ -149,9 +176,12 @@ bool Scatter(ray3* r, HitInformation* h, v3* attenuation, ray3* scattered) {
         
         case MATKIND_METAL: 
         {
-            v3 reflected = Reflected(r->direction, h->norm);
+            v3 reflected = Reflected(v3_Normalize(r->direction), h->norm);
             v3 random_in_sphere = v3_Mul(random_in_unit_sphere(), h->mat.metal.fuzz);
-            *scattered = (ray3){.origin = h->pos, .direction = v3_Add(reflected, random_in_sphere)};
+            *scattered = (ray3){
+                .origin = h->pos, 
+                .direction = v3_Add(reflected, random_in_sphere)
+            };
             *attenuation = h->mat.metal.albedo;
             return v3_Dot(scattered->direction, h->norm) > 0.f;
         }
@@ -286,30 +316,36 @@ int main(int argc, char** argv) {
         goto end;
     }
     
-    int width = 400;
-    int height = 200;
-    int rand_step = 100;
-    
+    int width = 1200;
+    int height = 800;
+    int rand_step = 10;
     
     float inv_w = 1.0f / ((float)width);
     float inv_h = 1.0f / ((float)height);
     
     OUT_PRINT("P3\n%d %d\n255\n", width, height);
     
-    Camera c = Camera_Make(v3_Make(-2.f, 2.f, 1.f), v3_Make(0.f, 0.f, -1.f), v3_Make(0.f, 1.f, 0.f), 30.f, ((float)width) / ((float) height));
+#if 0
+    v3 lookfrom = v3_Make(3.f, 3.f, 2.f);
+    v3 lookat = v3_Make(0.f, 0.f, -1.f);
+    
+    float distance_to_focus = v3_Length(v3_Sub(lookfrom, lookat));
+    float aperture = 2.0f;
+    
+    Camera c = Camera_Make(lookfrom, lookat, v3_Make(0.f, 1.f, 0.f), 20.f, ((float)width) / ((float) height), aperture, distance_to_focus);
     
     Object world[] = {
         {
             .kind = OBJECTKIND_SPHERE, 
             .pos = v3_Make(0.f, 0.f, -1.f), 
             .sphere = {.radius = 0.5f},
-            .mat = Material_MakeLambertian(v3_Make(0.8f, 0.3f, 0.3f)),
+            .mat = Material_MakeLambertian(v3_Make(0.1f, 0.2f, 0.5f)),
         },
         {
             .kind = OBJECTKIND_SPHERE, 
             .pos = v3_Make(1.f, 0.f, -1.f), 
             .sphere = {.radius = 0.5f},
-            .mat = Material_MakeMetal(v3_Make(0.8f, 0.6f, 0.2f), 1.0f),
+            .mat = Material_MakeMetal(v3_Make(0.8f, 0.6f, 0.2f), 0.0f),
         },
         {
             .kind = OBJECTKIND_SPHERE, 
@@ -331,6 +367,72 @@ int main(int argc, char** argv) {
         },
     };
     
+    int world_size = ArrayCount(world);
+#else
+    v3 lookfrom = v3_Make(13.f, 2.f, 3.f);
+    v3 lookat = v3_Make(0.f, 0.f, 0.f);
+    
+    float distance_to_focus = 10.f;
+    float aperture = 0.1f;
+    
+    Camera c = Camera_Make(lookfrom, lookat, v3_Make(0.f, 1.f, 0.f), 20.f, ((float)width) / ((float) height), aperture, distance_to_focus);
+    
+    Object world[501];
+    world[0] = (Object){
+        .kind = OBJECTKIND_SPHERE,
+        .pos = (v3){0, -1000, 0},
+        .sphere = {.radius = 1000},
+        .mat = Material_MakeLambertian((v3){0.5, 0.5, 0.5}),
+    };
+    
+    int o = 1;
+    for (int a = -11; a < 11; a++) {
+        for (int b = -11; b < 11; b++) {
+            float choose_mat = drand48();
+            v3 center = (v3){a + 0.9 * drand48(), 0.2, b + 0.9 * drand48()};
+            if ( v3_Length(v3_Sub(center, (v3){4, 0.2, 0})) > 0.9 ) {
+                Material m;
+                if (choose_mat < 0.8) { // diffuae
+                    m = Material_MakeLambertian((v3){ drand48() * drand48(), drand48() * drand48(), drand48() * drand48()});
+                } else if (choose_mat < 0.95) { // Metal
+                    m = Material_MakeMetal((v3){0.5 * ( 1 * drand48() ),  0.5 * ( 1 * drand48() ), 0.5 * ( 1 * drand48() )}, 0.5 * drand48());
+                } else {
+                    m = Material_MakeDieletric(1.5);
+                }
+                world[o++] = (Object){
+                    .kind = OBJECTKIND_SPHERE,
+                    .pos = center,
+                    .sphere = {.radius = 0.2},
+                    .mat = m,
+                };
+            }
+        }
+    }
+    
+    world[o++] = (Object){
+        .kind = OBJECTKIND_SPHERE,
+        .pos = (v3){0, 1, 0},
+        .sphere = {.radius = 1.0},
+        .mat = Material_MakeDieletric(1.5),
+    };
+    
+    world[o++] = (Object){
+        .kind = OBJECTKIND_SPHERE,
+        .pos = (v3){-4, 1, 0},
+        .sphere = {.radius = 1.0},
+        .mat = Material_MakeLambertian((v3){0.4, 0.2, 0.1}),
+    };
+    
+    world[o++] = (Object){
+        .kind = OBJECTKIND_SPHERE,
+        .pos = (v3){4, 1, 0},
+        .sphere = {.radius = 1.0},
+        .mat = Material_MakeMetal((v3){0.7, 0.6, 0.5}, 0.0),
+    };
+    
+    int world_size = o;
+#endif
+    
     for (int j = height - 1; j >= 0; j--) {
         for (int i = 0; i < width; i++) {
             OUT_PRINT(" ");
@@ -341,7 +443,7 @@ int main(int argc, char** argv) {
                 
                 ray3 r = Camera_GetRay(&c, u, v);
                 
-                v3_Added(&color, Color(r, world, ArrayCount(world), 0)); // get color mapped from 0.0 - 1.0
+                v3_Added(&color, Color(r, world, world_size, 0)); // get color mapped from 0.0 - 1.0
             }
             v3_Scaled(&color, (1.f/((float)rand_step)));
             color = (v3){sqrt(color.r), sqrt(color.g), sqrt(color.b)};
