@@ -38,6 +38,7 @@ v3 random_in_unit_disk(void) {
 typedef struct ray3 {
     v3 origin;
     v3 direction;
+    float time;
 } ray3;
 
 inline v3 ray3_PointAt(ray3 r, float t) {
@@ -51,9 +52,10 @@ typedef struct Camera {
     v3 vertical;
     v3 u, v, w;
     float lens_radius;
+    float time0, time1;
 } Camera;
 
-Camera Camera_Make(v3 lookFrom, v3 lookAt, v3 vup, float vfov, float aspect, float aperture, float focus_dist) {
+Camera Camera_Make(v3 lookFrom, v3 lookAt, v3 vup, float vfov, float aspect, float aperture, float focus_dist, float time0, float time1) {
     
     float lens_radius = aperture / 2.f;
     
@@ -80,10 +82,9 @@ Camera Camera_Make(v3 lookFrom, v3 lookAt, v3 vup, float vfov, float aspect, flo
         .horizontal = horizontal,
         .vertical   = vertical,
         .lower_left = lower_left,
-        .u = u,
-        .v = v,
-        .w = w,
+        .u = u, .v = v, .w = w,
         .lens_radius = lens_radius,
+        .time0 = time0, .time1 = time1,
     };
 }
 
@@ -97,10 +98,13 @@ ray3 Camera_GetRay(Camera *c, float s, float t) {
     v3 v = v3_Mul(c->vertical, t);
     v3 o = v3_Add(c->origin, offset);
     
+    float time = c->time0 + (drand48() * (c->time1 - c->time0));
+
     v3 direction = v3_Sub(v3_Add(c->lower_left, v3_Add(h, v)), o);
     return  (ray3) {
         .origin = o,
-        .direction = direction
+        .direction = direction,
+        .time = time,
     };
 }
 
@@ -111,7 +115,8 @@ typedef enum ObjectKind {
 typedef struct Object {
     
     ObjectKind kind;
-    v3 pos;
+    v3 pos0, pos1; // managing motion blur
+    float time0, time1;
     union {
         struct {
             float radius;
@@ -119,6 +124,11 @@ typedef struct Object {
     };
     Material mat;
 } Object;
+
+v3 Object_CenterAtTime(Object *o, float time) {
+    float t = ((time - o->time0) / (o->time1 - o->time0));
+    return v3_Add(o->pos0, v3_Mul(v3_Sub(o->pos1, o->pos0), t));
+}
 
 typedef struct HitInformation {
     float t;
@@ -169,7 +179,7 @@ bool Scatter(ray3* r, HitInformation* h, v3* attenuation, ray3* scattered) {
                 v3_Add(h->pos, h->norm)
                 );
             
-            *scattered = (ray3){.origin = h->pos, .direction = v3_Sub(target, h->pos)};
+            *scattered = (ray3){.origin = h->pos, .direction = v3_Sub(target, h->pos), .time = r->time};
             *attenuation = h->mat.lambertian.albedo;
             return true;
         }
@@ -180,7 +190,8 @@ bool Scatter(ray3* r, HitInformation* h, v3* attenuation, ray3* scattered) {
             v3 random_in_sphere = v3_Mul(random_in_unit_sphere(), h->mat.metal.fuzz);
             *scattered = (ray3){
                 .origin = h->pos, 
-                .direction = v3_Add(reflected, random_in_sphere)
+                .direction = v3_Add(reflected, random_in_sphere),
+                .time = r->time,
             };
             *attenuation = h->mat.metal.albedo;
             return v3_Dot(scattered->direction, h->norm) > 0.f;
@@ -217,9 +228,9 @@ bool Scatter(ray3* r, HitInformation* h, v3* attenuation, ray3* scattered) {
             }
             
             if (drand48() < reflect_prob) {
-                *scattered = (ray3){h->pos, reflected};
+                *scattered = (ray3){h->pos, reflected, r->time};
             } else {
-                *scattered = (ray3){h->pos, refracted};
+                *scattered = (ray3){h->pos, refracted, r->time};
             }
             return true;
         }
@@ -232,7 +243,7 @@ bool Scatter(ray3* r, HitInformation* h, v3* attenuation, ray3* scattered) {
 bool hit_sphere(ray3 r, Object *o, float tmin, float tmax, HitInformation *h) {
     assert(o->kind == OBJECTKIND_SPHERE);
     
-    v3 sphere_center = o->pos;
+    v3 sphere_center = Object_CenterAtTime(o, r.time);
     float radius = o->sphere.radius;
     
     v3 oc = v3_Sub(r.origin, sphere_center);
@@ -313,12 +324,11 @@ int main(int argc, char** argv) {
     srand(time(NULL));
     FILE* output = fopen("output/result.ppm", "w");
     if (output == NULL) {
-        goto end;
+        return 1;
     }
     
     int width = 1200;
     int height = 800;
-    int rand_step = 10;
     
     float inv_w = 1.0f / ((float)width);
     float inv_h = 1.0f / ((float)height);
@@ -357,7 +367,7 @@ int main(int argc, char** argv) {
             .kind = OBJECTKIND_SPHERE, 
             .pos = v3_Make(-1.f, 0.f, -1.f), 
             .sphere = {.radius = -0.45f},
-            .mat = Material_MakeDieletric(1.5f),
+            .mat = Material_MakeDieletric(1.5f),s
         },
         {
             .kind = OBJECTKIND_SPHERE, 
@@ -375,12 +385,14 @@ int main(int argc, char** argv) {
     float distance_to_focus = 10.f;
     float aperture = 0.1f;
     
-    Camera c = Camera_Make(lookfrom, lookat, v3_Make(0.f, 1.f, 0.f), 20.f, ((float)width) / ((float) height), aperture, distance_to_focus);
+    Camera c = Camera_Make(lookfrom, lookat, v3_Make(0.f, 1.f, 0.f), 20.f, ((float)width) / ((float) height), aperture, distance_to_focus,
+        0.0f, 1.0f);
     
     Object world[501];
     world[0] = (Object){
         .kind = OBJECTKIND_SPHERE,
-        .pos = (v3){0, -1000, 0},
+        .pos0 = (v3){0, -1000, 0}, .pos1 = (v3){0, -1000, 0},
+        .time0 = 0.0f, .time1 = 1.0f,
         .sphere = {.radius = 1000},
         .mat = Material_MakeLambertian((v3){0.5, 0.5, 0.5}),
     };
@@ -389,19 +401,23 @@ int main(int argc, char** argv) {
     for (int a = -11; a < 11; a++) {
         for (int b = -11; b < 11; b++) {
             float choose_mat = drand48();
-            v3 center = (v3){a + 0.9 * drand48(), 0.2, b + 0.9 * drand48()};
-            if ( v3_Length(v3_Sub(center, (v3){4, 0.2, 0})) > 0.9 ) {
+            v3 center0 = (v3){a + 0.9 * drand48(), 0.2, b + 0.9 * drand48()};
+            v3 center1 = center0;
+
+            if ( v3_Length(v3_Sub(center0, (v3){4, 0.2, 0})) > 0.9 ) {
                 Material m;
-                if (choose_mat < 0.8) { // diffuae
+                if (choose_mat < 0.8) { // diffuse
+                    center1 = v3_Add(center1, (v3){0, 0.3 * (1 + drand48()), 0});
                     m = Material_MakeLambertian((v3){ drand48() * drand48(), drand48() * drand48(), drand48() * drand48()});
                 } else if (choose_mat < 0.95) { // Metal
                     m = Material_MakeMetal((v3){0.5 * ( 1 * drand48() ),  0.5 * ( 1 * drand48() ), 0.5 * ( 1 * drand48() )}, 0.5 * drand48());
-                } else {
+               q } else {
                     m = Material_MakeDieletric(1.5);
                 }
                 world[o++] = (Object){
                     .kind = OBJECTKIND_SPHERE,
-                    .pos = center,
+                    .pos0 = center0, .pos1 = center1,
+                    .time0 = 0.0f, .time1 = 1.0f,
                     .sphere = {.radius = 0.2},
                     .mat = m,
                 };
@@ -411,21 +427,24 @@ int main(int argc, char** argv) {
     
     world[o++] = (Object){
         .kind = OBJECTKIND_SPHERE,
-        .pos = (v3){0, 1, 0},
+        .pos0 = (v3){0, 1, 0}, .pos1 = (v3){0, 1, 0},
+        .time0 = 0.0f, .time1 = 1.0f,
         .sphere = {.radius = 1.0},
         .mat = Material_MakeDieletric(1.5),
     };
     
     world[o++] = (Object){
         .kind = OBJECTKIND_SPHERE,
-        .pos = (v3){-4, 1, 0},
+        .pos0 = (v3){-4, 1, 0}, .pos1 = (v3){-4, 1, 0},
+        .time0 = 0.0f, .time1 = 1.0f,
         .sphere = {.radius = 1.0},
         .mat = Material_MakeLambertian((v3){0.4, 0.2, 0.1}),
     };
     
     world[o++] = (Object){
         .kind = OBJECTKIND_SPHERE,
-        .pos = (v3){4, 1, 0},
+        .pos0 = (v3){4, 1, 0}, .pos1 = (v3){4, 1, 0},
+        .time0 = 0.0f, .time1 = 1.0f,
         .sphere = {.radius = 1.0},
         .mat = Material_MakeMetal((v3){0.7, 0.6, 0.5}, 0.0),
     };
@@ -433,6 +452,7 @@ int main(int argc, char** argv) {
     int world_size = o;
 #endif
     
+    int rand_step = 100;
     for (int j = height - 1; j >= 0; j--) {
         for (int i = 0; i < width; i++) {
             OUT_PRINT(" ");
@@ -452,7 +472,6 @@ int main(int argc, char** argv) {
         }
         OUT_PRINT("\n");
     }
-    end:
     return 0;
 }
 
