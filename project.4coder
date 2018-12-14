@@ -1,9 +1,35 @@
-extensions = ".c.cpp.h.m.bat.sh.4coder";
-open_recursively = true;
+version(1);
 
-fkey_command_win[1] = {"build.bat", "*compilation*", true , true };
-fkey_command_win[2] = {"build\\main.exe", "*run*", false , true };
-fkey_command_linux[1] = {"./build.sh", "*compilation*", true , true };
-fkey_command_linux[2] = {"build/main", "*run*", false , true };
-fkey_command_mac[1] = {"./build.sh", "*compilation*", true , true };
-fkey_command_mac[2] = {"./build/main", "*run*", false , true };
+patterns = {
+"*.c",
+"*.h",
+"*.sh",
+"*.bat",
+"*.4coder",
+};
+
+blacklist_patterns = {
+".*",
+};
+
+load_paths = {
+ { {
+	{"."}
+	}, .os = "win" },
+};
+
+command_list = {
+ {
+	.name = "build",
+	.out = "*compilation*", .footer_panel = true, .save_dirty_files = true, .cursor_at_end = false,
+	.cmd = { { "build.bat", .os = "win" }, { "build.sh", .os = "mac" }, },
+ },
+ {
+	.name = "run",
+	.out = "*run*", .footer_panel = false, .save_dirty_files = true, .cursor_at_end = true,
+	.cmd = { { "build\\main.exe", .os = "win" }, { "build/main", .os = "mac" }, },
+ },
+};
+
+fkey_command[1] = "build";
+fkey_command[2] = "run";

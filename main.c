@@ -10,103 +10,14 @@
 #include "common.h"
 #include "vec3.h"
 #include "material.h"
+#include "ray.h"
+#include "camera.h"
 
 #include "vec3.c"
+#include "math_util.c"
 #include "material.c"
-
-v3 random_in_unit_sphere(void) {
-    v3 p;
-    do {
-        p = v3_Sub(
-            v3_Mul((v3){drand48(), drand48(), drand48()}, 2.0),
-            (v3){1.0, 1.0, 1.0}
-            );
-    } while (v3_SquaredLength(p) >= 1.0);
-    return p;
-}
-
-v3 random_in_unit_disk(void) {
-    v3 p;
-    do {
-        p = v3_Sub(
-            v3_Mul((v3){drand48(), drand48(), 0.f}, 2.f), 
-            (v3){1.f, 1.f, 0.f});
-    } while( v3_Dot(p, p) >= 1.f);
-    return p;
-}
-
-typedef struct ray3 {
-    v3 origin;
-    v3 direction;
-    float time;
-} ray3;
-
-inline v3 ray3_PointAt(ray3 r, float t) {
-    return v3_Add(r.origin, v3_Mul(r.direction, t));
-}
-
-typedef struct Camera {
-    v3 origin;
-    v3 lower_left;
-    v3 horizontal;
-    v3 vertical;
-    v3 u, v, w;
-    float lens_radius;
-    float time0, time1;
-} Camera;
-
-Camera Camera_Make(v3 lookFrom, v3 lookAt, v3 vup, float vfov, float aspect, float aperture, float focus_dist, float time0, float time1) {
-    
-    float lens_radius = aperture / 2.f;
-    
-    float theta = vfov*M_PI/180.f;
-    float half_height = tan(theta/2.f);
-    float half_width = aspect * half_height;
-    
-    v3 w = v3_Normalize(v3_Sub(lookFrom, lookAt));
-    v3 u = v3_Normalize(v3_Cross(vup, w));
-    v3 v = v3_Cross(w, u);
-    
-    v3 horizontal = v3_Mul(u, 2*half_width*focus_dist);
-    v3 vertical = v3_Mul(v, 2*half_height*focus_dist);
-    //((origin - u*half_width) - v * half_height) - w
-    v3 lower_left =
-        v3_Sub(v3_Sub(v3_Sub(
-        lookFrom, 
-        v3_Mul(u, half_width * focus_dist)), 
-                      v3_Mul(v, half_height * focus_dist)), 
-               v3_Mul(w, focus_dist));
-    
-    return (Camera){
-        .origin     = lookFrom,
-        .horizontal = horizontal,
-        .vertical   = vertical,
-        .lower_left = lower_left,
-        .u = u, .v = v, .w = w,
-        .lens_radius = lens_radius,
-        .time0 = time0, .time1 = time1,
-    };
-}
-
-ray3 Camera_GetRay(Camera *c, float s, float t) {
-    v3 rd = v3_Mul(random_in_unit_disk(), c->lens_radius);
-    v3 offset = v3_Add(
-        v3_Mul(c->u, rd.x),
-        v3_Mul(c->v, rd.y));
-    
-    v3 h = v3_Mul(c->horizontal, s);
-    v3 v = v3_Mul(c->vertical, t);
-    v3 o = v3_Add(c->origin, offset);
-    
-    float time = c->time0 + (drand48() * (c->time1 - c->time0));
-
-    v3 direction = v3_Sub(v3_Add(c->lower_left, v3_Add(h, v)), o);
-    return  (ray3) {
-        .origin = o,
-        .direction = direction,
-        .time = time,
-    };
-}
+#include "ray.c"
+#include "camera.c"
 
 typedef enum ObjectKind {
     OBJECTKIND_SPHERE,
@@ -125,7 +36,158 @@ typedef struct Object {
     Material mat;
 } Object;
 
-v3 Object_CenterAtTime(Object *o, float time) {
+int Object_XCmp(const void *a, const void *b) {
+    Object *o1 = (Object *)a, *o2 = (Object *)b;
+    if (o1->pos0.x < o2->pos0.x) return -1;
+    if (o1->pos0.x > o2->pos0.x) return 1;
+    return 0;
+}
+
+int Object_YCmp(const void *a, const void *b) {
+    Object *o1 = (Object *)a, *o2 = (Object *)b;
+    if (o1->pos0.y < o2->pos0.y) return -1;
+    if (o1->pos0.y > o2->pos0.y) return 1;
+    return 0;
+}
+
+int Object_ZCmp(const void *a, const void *b) {
+    Object *o1 = (Object *)a, *o2 = (Object *)b;
+    if (o1->pos0.z < o2->pos0.z) return -1;
+    if (o1->pos0.z > o2->pos0.z) return 1;
+    return 0;
+}
+
+typedef struct Aabb {
+    v3 min, max;
+} Aabb;
+
+typedef enum BvhNodeKind {
+    BVHNODEKIND_OBJECTS,
+    BVHNODEKIND_NODES,
+} BvhNodeKind;
+
+typedef struct BvhNode {
+    BvhNodeKind kind;
+    union {
+        struct {
+            Object *left, *right;
+        } objects;
+        struct {
+            struct BvhNode *left, *right;
+        } nodes;
+    };
+    Aabb box;
+} BvhNode;
+
+bool Aabb_MakeFromObject(Object *o, float t0, float t1, Aabb *b) {
+
+    v3 posMin = v3_Min(o->pos0, o->pos1);
+    v3 posMax = v3_Max(o->pos0, o->pos1);
+    switch (o->kind) {
+        case OBJECTKIND_SPHERE: {
+            *b = (Aabb){
+                .min = v3_Sub(posMin, (v3){o->sphere.radius, o->sphere.radius, o->sphere.radius}),
+                .max = v3_Add(posMax, (v3){o->sphere.radius, o->sphere.radius, o->sphere.radius}),
+            };
+            return true;
+        } break;
+    }
+    return false;
+}
+
+bool Aabb_Compound(Aabb b1, Aabb b2, Aabb *r) {
+    *r = (Aabb) {
+        .min = (v3){fmin(b1.min.x, b2.min.x), fmin(b1.min.y, b2.min.y), fmin(b1.min.z, b2.min.z)},
+        .max = (v3){fmax(b1.max.x, b2.max.x), fmax(b1.max.y, b2.max.y), fmax(b1.max.z, b2.max.z)}
+    };
+    return true;
+}
+
+bool hit_aabb(Aabb b, ray3 r) {
+    v3 invRayDir = v3_Inv(r.direction);
+
+    v3 t0 = v3_Sub(b.min, r.origin);
+    t0 = (v3){t0.x * invRayDir.x, t0.y * invRayDir.y, t0.z * invRayDir.z};
+
+    v3 t1 = v3_Sub(b.max, r.origin);
+    t1 = (v3){t1.x * invRayDir.x, t1.y * invRayDir.y, t1.z * invRayDir.z}; 
+
+    v3 tmin = v3_Min(t0, t1), tmax = v3_Max(t0, t1);
+    return v3_MaxCompo(tmin) <= v3_MinCompo(tmax);
+}
+
+enum {
+    SortOrderX = 0,
+    SortOrderY = 1,
+    SortOrderZ = 2,
+    SortOrder_COUNT,
+};
+
+BvhNode *BvhNode_Alloc(void) {
+    return malloc(sizeof(BvhNode));
+}
+
+BvhNode *BvhNode_MakeWithObjects(Object *left, Object *right) {
+    BvhNode *result = BvhNode_Alloc();
+    result->kind = BVHNODEKIND_OBJECTS;
+    result->objects.left = left;
+    result->objects.right = right;
+
+    Aabb b1, b2;
+    Aabb_MakeFromObject(left, 0, 1, &b1);
+    Aabb_MakeFromObject(right, 0, 1, &b2);
+    Aabb_Compound(b1, b2, &result->box);
+
+    return result;
+}
+
+bool BvhTree_MakeFromObjects(Object *o, int o_count, float t0, float t1, BvhNode *n) {
+
+    int sort_order = ((int)(drand48() * (double)SortOrder_COUNT)) % SortOrder_COUNT;
+    switch (sort_order) {
+        case SortOrderX: {
+            qsort(o, o_count, sizeof(Object), Object_XCmp);
+        } break;
+        case SortOrderY: {
+            qsort(o, o_count, sizeof(Object), Object_YCmp);
+        } break;
+        case SortOrderZ: {
+            qsort(o, o_count, sizeof(Object), Object_ZCmp);
+        } break;
+    }
+
+    Aabb bl, br;
+    if (o_count == 1) { 
+        n->kind = BVHNODEKIND_OBJECTS;
+        n->objects.left = n->objects.right = o;
+
+        Aabb_MakeFromObject(o, t0, t1, &bl);
+        br = bl;
+    } else if (o_count == 2) { 
+        n->kind = BVHNODEKIND_OBJECTS;
+        n->objects.left = o;
+        n->objects.right = o + 1;
+
+        if (!Aabb_MakeFromObject(o, t0, t1, &bl)) return false;
+        if (!Aabb_MakeFromObject(o + 1, t0, t1, &br)) return false;
+    } else {
+        n->kind = BVHNODEKIND_NODES;
+        n->nodes.left = BvhNode_Alloc();
+        n->nodes.right = BvhNode_Alloc();
+
+        int middle = o_count / 2;
+        if (!BvhTree_MakeFromObjects(o, middle, t0, t1, n->nodes.left)) return false;
+        if (!BvhTree_MakeFromObjects(o + middle, o_count - middle, t0, t1, n->nodes.right)) return false;
+
+        bl = n->nodes.left->box;
+        br = n->nodes.right->box;
+    }
+    Aabb_Compound(bl, br, &n->box);
+
+    return true;
+}
+
+v3 Object_PosAtTime(Object *o, float time) {
     float t = ((time - o->time0) / (o->time1 - o->time0));
     return v3_Add(o->pos0, v3_Mul(v3_Sub(o->pos1, o->pos0), t));
 }
@@ -175,7 +237,7 @@ bool Scatter(ray3* r, HitInformation* h, v3* attenuation, ray3* scattered) {
         case MATKIND_LAMBERTIAN:
         {
             v3 target = v3_Add(
-                random_in_unit_sphere(),
+                RandomInUnitSphere(),
                 v3_Add(h->pos, h->norm)
                 );
             
@@ -187,7 +249,7 @@ bool Scatter(ray3* r, HitInformation* h, v3* attenuation, ray3* scattered) {
         case MATKIND_METAL: 
         {
             v3 reflected = Reflected(v3_Normalize(r->direction), h->norm);
-            v3 random_in_sphere = v3_Mul(random_in_unit_sphere(), h->mat.metal.fuzz);
+            v3 random_in_sphere = v3_Mul(RandomInUnitSphere(), h->mat.metal.fuzz);
             *scattered = (ray3){
                 .origin = h->pos, 
                 .direction = v3_Add(reflected, random_in_sphere),
@@ -243,7 +305,7 @@ bool Scatter(ray3* r, HitInformation* h, v3* attenuation, ray3* scattered) {
 bool hit_sphere(ray3 r, Object *o, float tmin, float tmax, HitInformation *h) {
     assert(o->kind == OBJECTKIND_SPHERE);
     
-    v3 sphere_center = Object_CenterAtTime(o, r.time);
+    v3 sphere_center = Object_PosAtTime(o, r.time);
     float radius = o->sphere.radius;
     
     v3 oc = v3_Sub(r.origin, sphere_center);
@@ -258,6 +320,7 @@ bool hit_sphere(ray3 r, Object *o, float tmin, float tmax, HitInformation *h) {
             h->t = temp;
             h->pos = ray3_PointAt(r, temp);
             h->norm = v3_Normalize(v3_Mul(v3_Sub(h->pos, sphere_center), 1.f/radius));
+            h->mat = o->mat;
             return true;
         }
         
@@ -266,11 +329,70 @@ bool hit_sphere(ray3 r, Object *o, float tmin, float tmax, HitInformation *h) {
             h->t = temp;
             h->pos = ray3_PointAt(r, temp);
             h->norm = v3_Normalize(v3_Mul(v3_Sub(h->pos, sphere_center), 1.f/radius));
+            h->mat = o->mat;
             return true;
         }
     }
     
     return false;
+}
+
+bool hit_bvh(ray3 r, BvhNode *n, float tmin, float tmax, HitInformation *h) {
+#if 1
+    if (hit_aabb(n->box, r)) {
+#else
+    if (hit_aabb1(n->box, r, tmin, tmax)) {
+#endif
+        bool did_hit_left = false, did_hit_right = false;
+        HitInformation left_info, right_info;
+        switch (n->kind) {
+            case BVHNODEKIND_NODES: {
+                did_hit_left = hit_bvh(r, n->nodes.left, tmin, tmax, &left_info);
+                did_hit_right = hit_bvh(r, n->nodes.right, tmin, tmax, &right_info);
+            } break;
+            case BVHNODEKIND_OBJECTS: {
+                did_hit_left = hit_sphere(r, n->objects.left, tmin, tmax, &left_info);
+                did_hit_right = hit_sphere(r, n->objects.right, tmin, tmax, &right_info);
+            } break;
+        }
+
+        if (did_hit_left && did_hit_right) {
+            *h = left_info.t < right_info.t ? left_info : right_info;
+            return true;
+        } else if (did_hit_left) {
+            *h = left_info;
+            return true;
+        } else if (did_hit_right) { 
+            *h = right_info;
+            return true;
+        } else {
+            return false;
+        }
+    } else {
+        return false;
+    }
+}
+
+v3 ColorAABB(ray3 r, BvhNode *tree, int depth) {
+
+    HitInformation h;
+    if (hit_bvh(r, tree, 0.001, FLT_MAX, &h)) {
+        ray3 new_ray;
+        v3 attenutation;
+        if (depth < 50 && Scatter(&r, &h,&attenutation, &new_ray)) {
+            v3 color = ColorAABB(new_ray, tree, depth + 1);
+            return (v3){color.r * attenutation.r, color.g * attenutation.g, color.b * attenutation.b};
+        } else {
+            return (v3){ 0.f, 0.f, 0.f};
+        }
+    } else {
+        v3 unit_direction = v3_Normalize(r.direction);
+        float t = (unit_direction.y + 1.f) * 0.5f;
+        return v3_Add(
+            v3_Mul(v3_Make(1.f, 1.f, 1.f), (1.f-t)),
+            v3_Mul(v3_Make(0.5f, 0.7f, 1.f), t)
+            );
+    }
 }
 
 v3 Color(ray3 r, Object *objects, int object_count, int depth) {
@@ -320,7 +442,6 @@ v3 Color(ray3 r, Object *objects, int object_count, int depth) {
 
 #define OUT_PRINT(str, ...) (fprintf(output, str, __VA_ARGS__))
 int main(int argc, char** argv) {
-    
     srand(time(NULL));
     FILE* output = fopen("output/result.ppm", "w");
     if (output == NULL) {
@@ -335,50 +456,6 @@ int main(int argc, char** argv) {
     
     OUT_PRINT("P3\n%d %d\n255\n", width, height);
     
-#if 0
-    v3 lookfrom = v3_Make(3.f, 3.f, 2.f);
-    v3 lookat = v3_Make(0.f, 0.f, -1.f);
-    
-    float distance_to_focus = v3_Length(v3_Sub(lookfrom, lookat));
-    float aperture = 2.0f;
-    
-    Camera c = Camera_Make(lookfrom, lookat, v3_Make(0.f, 1.f, 0.f), 20.f, ((float)width) / ((float) height), aperture, distance_to_focus);
-    
-    Object world[] = {
-        {
-            .kind = OBJECTKIND_SPHERE, 
-            .pos = v3_Make(0.f, 0.f, -1.f), 
-            .sphere = {.radius = 0.5f},
-            .mat = Material_MakeLambertian(v3_Make(0.1f, 0.2f, 0.5f)),
-        },
-        {
-            .kind = OBJECTKIND_SPHERE, 
-            .pos = v3_Make(1.f, 0.f, -1.f), 
-            .sphere = {.radius = 0.5f},
-            .mat = Material_MakeMetal(v3_Make(0.8f, 0.6f, 0.2f), 0.0f),
-        },
-        {
-            .kind = OBJECTKIND_SPHERE, 
-            .pos = v3_Make(-1.f, 0.f, -1.f), 
-            .sphere = {.radius = 0.5f},
-            .mat = Material_MakeDieletric(1.5f),
-        },
-        {
-            .kind = OBJECTKIND_SPHERE, 
-            .pos = v3_Make(-1.f, 0.f, -1.f), 
-            .sphere = {.radius = -0.45f},
-            .mat = Material_MakeDieletric(1.5f),s
-        },
-        {
-            .kind = OBJECTKIND_SPHERE, 
-            .pos = v3_Make(0.f, -100.5f, -1.f), 
-            .sphere = {.radius = 100.0f},
-            .mat = Material_MakeLambertian(v3_Make(0.8f, 0.8f, 0.0f)),
-        },
-    };
-    
-    int world_size = ArrayCount(world);
-#else
     v3 lookfrom = v3_Make(13.f, 2.f, 3.f);
     v3 lookat = v3_Make(0.f, 0.f, 0.f);
     
@@ -388,7 +465,7 @@ int main(int argc, char** argv) {
     Camera c = Camera_Make(lookfrom, lookat, v3_Make(0.f, 1.f, 0.f), 20.f, ((float)width) / ((float) height), aperture, distance_to_focus,
         0.0f, 1.0f);
     
-    Object world[501];
+    Object world[501] = {0};
     world[0] = (Object){
         .kind = OBJECTKIND_SPHERE,
         .pos0 = (v3){0, -1000, 0}, .pos1 = (v3){0, -1000, 0},
@@ -407,11 +484,11 @@ int main(int argc, char** argv) {
             if ( v3_Length(v3_Sub(center0, (v3){4, 0.2, 0})) > 0.9 ) {
                 Material m;
                 if (choose_mat < 0.8) { // diffuse
-                    center1 = v3_Add(center1, (v3){0, 0.3 * (1 + drand48()), 0});
+//                    center1 = v3_Add(center1, (v3){0, 0.3 * (1 + drand48()), 0});
                     m = Material_MakeLambertian((v3){ drand48() * drand48(), drand48() * drand48(), drand48() * drand48()});
                 } else if (choose_mat < 0.95) { // Metal
                     m = Material_MakeMetal((v3){0.5 * ( 1 * drand48() ),  0.5 * ( 1 * drand48() ), 0.5 * ( 1 * drand48() )}, 0.5 * drand48());
-               q } else {
+                } else {
                     m = Material_MakeDieletric(1.5);
                 }
                 world[o++] = (Object){
@@ -450,8 +527,12 @@ int main(int argc, char** argv) {
     };
     
     int world_size = o;
-#endif
-    
+
+    BvhNode tree;
+    if (!BvhTree_MakeFromObjects(world, world_size, 0.0f, 1.0f, &tree)) {
+        return 1;
+    }
+
     int rand_step = 100;
     for (int j = height - 1; j >= 0; j--) {
         for (int i = 0; i < width; i++) {
@@ -463,7 +544,7 @@ int main(int argc, char** argv) {
                 
                 ray3 r = Camera_GetRay(&c, u, v);
                 
-                v3_Added(&color, Color(r, world, world_size, 0)); // get color mapped from 0.0 - 1.0
+                v3_Added(&color, ColorAABB(r, &tree, 0)); // get color mapped from 0.0 - 1.0
             }
             v3_Scaled(&color, (1.f/((float)rand_step)));
             color = (v3){sqrt(color.r), sqrt(color.g), sqrt(color.b)};

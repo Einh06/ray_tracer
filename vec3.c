@@ -64,4 +64,17 @@ inline v3 v3_Cross(v3 a, v3 b) {
     return (v3){ .x = a.y * b.z - a.z * b.y, .y = a.z * b.x - a.x * b.z, .z = a.x * b.y - a.y * b.x};
 }
 
+#define v3_MinCompo(v) (MIN((v).x, MIN((v).y, (v).z)))
+#define v3_MaxCompo(v) (MAX((v).x, MAX((v).y, (v).z)))
 
+v3 v3_Min(v3 a, v3 b) {
+    return (v3){ MIN(a.x, b.x), MIN(a.y, b.y), MIN(a.z, b.z) };
+}
+
+v3 v3_Max(v3 a, v3 b) {
+    return (v3){MAX(a.x, b.x), MAX(a.y, b.y), MAX(a.z, b.z)};
+}
+
+v3 v3_Inv(v3 v) {
+    return (v3){.x = 1.0f/v.x, .y = 1.0f/v.y, .z = 1.0f/v.z};
+}
