@@ -123,8 +123,55 @@ enum {
     SortOrder_COUNT,
 };
 
+enum {
+    ARENA_BLOCK_CAPACITY = 1024 * 1024,
+};
+
+typedef struct ArenaBlock {
+    size_t used;
+    struct ArenaBlock *next_block;
+    void *block; // @Important: Keep at the end
+} ArenaBlock;
+
+ArenaBlock *ArenaBlock_Alloc(void) {
+    size_t size = offsetof(ArenaBlock, block) + ARENA_BLOCK_CAPACITY;
+    ArenaBlock *block = malloc(size);
+    return block;
+}
+
+void *ArenaBlock_Reserve(ArenaBlock *block, size_t size) {
+    // TODO(Florian): Take memory alignement into account
+    assert(block->used + size < ARENA_BLOCK_CAPACITY);
+    size_t start = block->used;
+    block->used += size;
+    return ((char *)(&block->block)) + start;
+}
+
+typedef struct Arena {
+    struct ArenaBlock *first;
+    struct ArenaBlock *current;
+} Arena;
+
+void Arena_Init(Arena *a) {
+    a->first = a->current = ArenaBlock_Alloc(); 
+}
+
+void *Arena_Alloc(Arena *a, size_t size) {
+    assert(size <= ARENA_BLOCK_CAPACITY);
+    ArenaBlock *current = a->current;
+    if (current->used + size >= ARENA_BLOCK_CAPACITY) {
+        current->next_block = ArenaBlock_Alloc();
+        current = current->next_block;
+    }
+
+    return ArenaBlock_Reserve(current, size);
+}
+
+
+Arena bvh_arena;
+
 BvhNode *BvhNode_Alloc(void) {
-    return malloc(sizeof(BvhNode));
+    return Arena_Alloc(&bvh_arena, sizeof(BvhNode));
 }
 
 BvhNode *BvhNode_MakeWithObjects(Object *left, Object *right) {
@@ -447,6 +494,8 @@ int main(int argc, char** argv) {
     if (output == NULL) {
         return 1;
     }
+
+    Arena_Init(&bvh_arena);
     
     int width = 1200;
     int height = 800;
@@ -533,6 +582,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    time_t start = time(NULL);
     int rand_step = 100;
     for (int j = height - 1; j >= 0; j--) {
         for (int i = 0; i < width; i++) {
@@ -553,6 +603,10 @@ int main(int argc, char** argv) {
         }
         OUT_PRINT("\n");
     }
+    time_t end = time(NULL);
+
+    printf("Time spent %ld", (long)(end-start));
+
     return 0;
 }
 
