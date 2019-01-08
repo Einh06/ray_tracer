@@ -9,22 +9,23 @@
 
 #include "common.h"
 #include "vec3.h"
+#include "texture.h"
 #include "material.h"
 #include "ray.h"
 #include "camera.h"
 
 #include "vec3.c"
 #include "math_util.c"
+#include "texture.c"
 #include "material.c"
 #include "ray.c"
 #include "camera.c"
 
 typedef enum ObjectKind {
-    OBJECTKIND_SPHERE,
+    ObjectKind_Sphere,
 }ObjectKind;
 
 typedef struct Object {
-    
     ObjectKind kind;
     v3 pos0, pos1; // managing motion blur
     float time0, time1;
@@ -84,7 +85,7 @@ bool Aabb_MakeFromObject(Object *o, float t0, float t1, Aabb *b) {
     v3 posMin = v3_Min(o->pos0, o->pos1);
     v3 posMax = v3_Max(o->pos0, o->pos1);
     switch (o->kind) {
-        case OBJECTKIND_SPHERE: {
+        case ObjectKind_Sphere: {
             *b = (Aabb){
                 .min = v3_Sub(posMin, (v3){o->sphere.radius, o->sphere.radius, o->sphere.radius}),
                 .max = v3_Add(posMax, (v3){o->sphere.radius, o->sphere.radius, o->sphere.radius}),
@@ -125,50 +126,51 @@ enum {
 
 enum {
     ARENA_BLOCK_CAPACITY = 1024 * 1024,
+    ARENA_BLOCKS_INCREMENT = 5,
 };
 
-typedef struct ArenaBlock {
-    size_t used;
-    struct ArenaBlock *next_block;
-    void *block; // @Important: Keep at the end
-} ArenaBlock;
-
-ArenaBlock *ArenaBlock_Alloc(void) {
-    size_t size = offsetof(ArenaBlock, block) + ARENA_BLOCK_CAPACITY;
-    ArenaBlock *block = malloc(size);
-    return block;
-}
-
-void *ArenaBlock_Reserve(ArenaBlock *block, size_t size) {
-    // TODO(Florian): Take memory alignement into account
-    assert(block->used + size < ARENA_BLOCK_CAPACITY);
-    size_t start = block->used;
-    block->used += size;
-    return ((char *)(&block->block)) + start;
-}
-
 typedef struct Arena {
-    struct ArenaBlock *first;
-    struct ArenaBlock *current;
+    char *start;
+    char *end;
+    void **blocks;
+    size_t blocks_count;
+    size_t blocks_capacity;
 } Arena;
 
 void Arena_Init(Arena *a) {
-    a->first = a->current = ArenaBlock_Alloc(); 
+    size_t capacity = sizeof(void *) * ARENA_BLOCKS_INCREMENT;
+    a->blocks = malloc(capacity);
+    a->blocks_count = 1;
+    a->blocks_capacity = capacity;
+
+    char *new_block = malloc(ARENA_BLOCK_CAPACITY);
+
+    a->blocks[0] = a->start = new_block;
+    a->end = a->start + ARENA_BLOCK_CAPACITY;
 }
 
 void *Arena_Alloc(Arena *a, size_t size) {
     assert(size <= ARENA_BLOCK_CAPACITY);
-    ArenaBlock *current = a->current;
-    if (current->used + size >= ARENA_BLOCK_CAPACITY) {
-        current->next_block = ArenaBlock_Alloc();
-        current = current->next_block;
+    if ((a->end - a->start)  >= size) {
+        if (a->blocks_count + 1 >= a->blocks_capacity) {
+            size_t capacity = a->blocks_capacity + ARENA_BLOCKS_INCREMENT;
+            void *blocks = realloc(a->blocks, capacity);
+            assert(blocks != NULL);
+            a->blocks = blocks;
+            a->blocks_capacity = capacity;
+        }
+
+        void *new_block = malloc(ARENA_BLOCK_CAPACITY);
+        a->blocks[a->blocks_count++] = a->start = new_block;
+        a->end = a->start + ARENA_BLOCK_CAPACITY;
     }
 
-    return ArenaBlock_Reserve(current, size);
+    void *result = a->start;
+    a->start += size;
+    return result;
 }
 
-
-Arena bvh_arena;
+Arena bvh_arena = {0};
 
 BvhNode *BvhNode_Alloc(void) {
     return Arena_Alloc(&bvh_arena, sizeof(BvhNode));
@@ -189,7 +191,6 @@ BvhNode *BvhNode_MakeWithObjects(Object *left, Object *right) {
 }
 
 bool BvhTree_MakeFromObjects(Object *o, int o_count, float t0, float t1, BvhNode *n) {
-
     int sort_order = ((int)(drand48() * (double)SortOrder_COUNT)) % SortOrder_COUNT;
     switch (sort_order) {
         case SortOrderX: {
@@ -289,7 +290,7 @@ bool Scatter(ray3* r, HitInformation* h, v3* attenuation, ray3* scattered) {
                 );
             
             *scattered = (ray3){.origin = h->pos, .direction = v3_Sub(target, h->pos), .time = r->time};
-            *attenuation = h->mat.lambertian.albedo;
+            *attenuation = Texture_ColorAt(&h->mat.lambertian.albedo, 0.f, 0.f, &h->pos);
             return true;
         }
         
@@ -350,7 +351,7 @@ bool Scatter(ray3* r, HitInformation* h, v3* attenuation, ray3* scattered) {
 }
 
 bool hit_sphere(ray3 r, Object *o, float tmin, float tmax, HitInformation *h) {
-    assert(o->kind == OBJECTKIND_SPHERE);
+    assert(o->kind == ObjectKind_Sphere);
     
     v3 sphere_center = Object_PosAtTime(o, r.time);
     float radius = o->sphere.radius;
@@ -385,11 +386,7 @@ bool hit_sphere(ray3 r, Object *o, float tmin, float tmax, HitInformation *h) {
 }
 
 bool hit_bvh(ray3 r, BvhNode *n, float tmin, float tmax, HitInformation *h) {
-#if 1
     if (hit_aabb(n->box, r)) {
-#else
-    if (hit_aabb1(n->box, r, tmin, tmax)) {
-#endif
         bool did_hit_left = false, did_hit_right = false;
         HitInformation left_info, right_info;
         switch (n->kind) {
@@ -452,7 +449,7 @@ v3 Color(ray3 r, Object *objects, int object_count, int depth) {
         HitInformation temp_hit;
         
         switch (o->kind) {
-            case OBJECTKIND_SPHERE: {
+            case ObjectKind_Sphere: {
                 if (!hit_sphere(r, o, 0.001, closest_so_far,  &temp_hit)) { continue; }
                 closest_so_far = temp_hit.t;
                 hit_something = true;
@@ -514,13 +511,16 @@ int main(int argc, char** argv) {
     Camera c = Camera_Make(lookfrom, lookat, v3_Make(0.f, 1.f, 0.f), 20.f, ((float)width) / ((float) height), aperture, distance_to_focus,
         0.0f, 1.0f);
     
+    Texture chk1 = Texture_MakeColor((v3){ 0.2, 0.3, 0.1 }), 
+            chk2 = Texture_MakeColor((v3){ 0.9, 0.9, 0.9 });
+
     Object world[501] = {0};
     world[0] = (Object){
-        .kind = OBJECTKIND_SPHERE,
+        .kind = ObjectKind_Sphere,
         .pos0 = (v3){0, -1000, 0}, .pos1 = (v3){0, -1000, 0},
         .time0 = 0.0f, .time1 = 1.0f,
         .sphere = {.radius = 1000},
-        .mat = Material_MakeLambertian((v3){0.5, 0.5, 0.5}),
+        .mat = Material_MakeLambertian(Texture_MakeChecker( &chk1, &chk2)),
     };
     
     int o = 1;
@@ -534,14 +534,18 @@ int main(int argc, char** argv) {
                 Material m;
                 if (choose_mat < 0.8) { // diffuse
 //                    center1 = v3_Add(center1, (v3){0, 0.3 * (1 + drand48()), 0});
-                    m = Material_MakeLambertian((v3){ drand48() * drand48(), drand48() * drand48(), drand48() * drand48()});
+                    m = Material_MakeLambertian(
+                            Texture_MakeColor((v3){ 
+                                drand48() * drand48(), 
+                                drand48() * drand48(), 
+                                drand48() * drand48()}));
                 } else if (choose_mat < 0.95) { // Metal
                     m = Material_MakeMetal((v3){0.5 * ( 1 * drand48() ),  0.5 * ( 1 * drand48() ), 0.5 * ( 1 * drand48() )}, 0.5 * drand48());
                 } else {
                     m = Material_MakeDieletric(1.5);
                 }
                 world[o++] = (Object){
-                    .kind = OBJECTKIND_SPHERE,
+                    .kind = ObjectKind_Sphere,
                     .pos0 = center0, .pos1 = center1,
                     .time0 = 0.0f, .time1 = 1.0f,
                     .sphere = {.radius = 0.2},
@@ -552,7 +556,7 @@ int main(int argc, char** argv) {
     }
     
     world[o++] = (Object){
-        .kind = OBJECTKIND_SPHERE,
+        .kind = ObjectKind_Sphere,
         .pos0 = (v3){0, 1, 0}, .pos1 = (v3){0, 1, 0},
         .time0 = 0.0f, .time1 = 1.0f,
         .sphere = {.radius = 1.0},
@@ -560,15 +564,15 @@ int main(int argc, char** argv) {
     };
     
     world[o++] = (Object){
-        .kind = OBJECTKIND_SPHERE,
+        .kind = ObjectKind_Sphere,
         .pos0 = (v3){-4, 1, 0}, .pos1 = (v3){-4, 1, 0},
         .time0 = 0.0f, .time1 = 1.0f,
         .sphere = {.radius = 1.0},
-        .mat = Material_MakeLambertian((v3){0.4, 0.2, 0.1}),
+        .mat = Material_MakeLambertian(Texture_MakeColor((v3){0.4, 0.2, 0.1})),
     };
     
     world[o++] = (Object){
-        .kind = OBJECTKIND_SPHERE,
+        .kind = ObjectKind_Sphere,
         .pos0 = (v3){4, 1, 0}, .pos1 = (v3){4, 1, 0},
         .time0 = 0.0f, .time1 = 1.0f,
         .sphere = {.radius = 1.0},

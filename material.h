@@ -9,7 +9,7 @@ typedef struct Material {
     MaterialKind kind;
     union {
         struct {
-            v3 albedo;
+            Texture albedo;
         } lambertian;
         
         struct {
