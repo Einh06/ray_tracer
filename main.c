@@ -15,6 +15,7 @@
 #include "camera.h"
 
 #include "vec3.c"
+#include "perlin.c"
 #include "math_util.c"
 #include "texture.c"
 #include "material.c"
@@ -483,38 +484,16 @@ v3 Color(ray3 r, Object *objects, int object_count, int depth) {
             );
     }
 }
+void ComplexWorld(Object **out_world, int *out_count) {
 
-#define OUT_PRINT(str, ...) (fprintf(output, str, __VA_ARGS__))
-int main(int argc, char** argv) {
-    srand(time(NULL));
-    FILE* output = fopen("output/result.ppm", "w");
-    if (output == NULL) {
-        return 1;
-    }
-
-    Arena_Init(&bvh_arena);
-    
-    int width = 1200;
-    int height = 800;
-    
-    float inv_w = 1.0f / ((float)width);
-    float inv_h = 1.0f / ((float)height);
-    
-    OUT_PRINT("P3\n%d %d\n255\n", width, height);
-    
-    v3 lookfrom = v3_Make(13.f, 2.f, 3.f);
-    v3 lookat = v3_Make(0.f, 0.f, 0.f);
-    
-    float distance_to_focus = 10.f;
-    float aperture = 0.1f;
-    
-    Camera c = Camera_Make(lookfrom, lookat, v3_Make(0.f, 1.f, 0.f), 20.f, ((float)width) / ((float) height), aperture, distance_to_focus,
-        0.0f, 1.0f);
-    
     Texture chk1 = Texture_MakeColor((v3){ 0.2, 0.3, 0.1 }), 
             chk2 = Texture_MakeColor((v3){ 0.9, 0.9, 0.9 });
 
-    Object world[501] = {0};
+    Object *world = malloc(501 * sizeof(Object));
+
+    *out_world = world;
+    *out_count = 501;
+
     world[0] = (Object){
         .kind = ObjectKind_Sphere,
         .pos0 = (v3){0, -1000, 0}, .pos1 = (v3){0, -1000, 0},
@@ -578,8 +557,63 @@ int main(int argc, char** argv) {
         .sphere = {.radius = 1.0},
         .mat = Material_MakeMetal((v3){0.7, 0.6, 0.5}, 0.0),
     };
+}
+
+void TwoPerlinSphere(Object **out_world, int *out_count) {
+    Texture p = Texture_MakeNoise(5.f);
+    Object *world = malloc(2 * sizeof(Object));
+    v3 pos0 = {0, -1000, 0};
+    v3 pos1 = {0, 2, 0};
+
+    world[0] = (Object) {
+        .kind = ObjectKind_Sphere,
+        .pos0 = pos0, .pos1 = pos0,
+        .time0 = 0.0f, .time1 = 1.0f,
+        .sphere = {.radius = 1000},
+        .mat = Material_MakeLambertian(p),
+    };
+    world[1] = (Object) {
+        .kind = ObjectKind_Sphere,
+        .pos0 = pos1, .pos1 = pos1,
+        .time0 = 0.0f, .time1 = 1.0f,
+        .sphere = {.radius = 2},
+        .mat = Material_MakeLambertian(p),
+    };
+
+    *out_world = world;
+    *out_count = 2;
+}
+
+#define OUT_PRINT(str, ...) (fprintf(output, str, __VA_ARGS__))
+int main(int argc, char** argv) {
+    srand(time(NULL));
+    FILE* output = fopen("output/result.ppm", "w");
+    if (output == NULL) {
+        return 1;
+    }
+
+    Arena_Init(&bvh_arena);
+    Perlin_Init();
     
-    int world_size = o;
+    int width = 1200;
+    int height = 800;
+    
+    float inv_w = 1.0f / ((float)width);
+    float inv_h = 1.0f / ((float)height);
+    
+    OUT_PRINT("P3\n%d %d\n255\n", width, height);
+    
+    v3 lookfrom = v3_Make(13.f, 2.f, 3.f);
+    v3 lookat = v3_Make(0.f, 0.f, 0.f);
+    
+    float distance_to_focus = 10.f;
+    float aperture = 0.f;
+    
+    Camera c = Camera_Make(lookfrom, lookat, v3_Make(0.f, 1.f, 0.f), 20.f, ((float)width) / ((float) height), aperture, distance_to_focus, 0.0f, 1.0f);
+
+    Object *world = NULL;
+    int world_size = 0;
+    TwoPerlinSphere(&world, &world_size);
 
     BvhNode tree;
     if (!BvhTree_MakeFromObjects(world, world_size, 0.0f, 1.0f, &tree)) {

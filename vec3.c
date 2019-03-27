@@ -50,7 +50,7 @@ inline v3 v3_Mul(v3 v, float s) {
     return (v3){.x = v.x * s, .y = v.y * s, .z = v.z * s };
 }
 
-inline v3_Scaled(v3* v, float s) {
+inline void v3_Scaled(v3* v, float s) {
     v->x *= s;
     v->y *= s;
     v->z *= s;
